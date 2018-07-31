@@ -49,6 +49,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 
 /**
  * Planner rule that reduces aggregate functions in
@@ -565,7 +566,7 @@ public class AggregateReduceFunctionsRule extends RelOptRule {
       Map<AggregateCall, RexNode> aggCallMapping,
       List<RexNode> inputExprs) {
     // regr_slope(x, y) ==>
-    //     covar_pop(x * y) / var_pop(y)
+    //     covar_pop(x, y) / var_pop(y)
 
     final RelOptCluster cluster = oldAggRel.getCluster();
     final RexBuilder rexBuilder = cluster.getRexBuilder();
@@ -580,8 +581,8 @@ public class AggregateReduceFunctionsRule extends RelOptRule {
     final RelDataType argXOrdinalType = getFieldType(oldAggRel.getInput(), argXOrdinal);
     final RelDataType argYOrdinalType = getFieldType(oldAggRel.getInput(), argYOrdinal);
     final RelDataType oldCallType =
-            cluster.getTypeFactory().createTypeWithNullability(oldCall.getType(),
-                    argXOrdinalType.isNullable() || argYOrdinalType.isNullable());
+        cluster.getTypeFactory().createTypeWithNullability(oldCall.getType(),
+            argXOrdinalType.isNullable() || argYOrdinalType.isNullable());
     final RexNode argX = rexBuilder.ensureType(argXType, inputExprs.get(argXOrdinal), true);
     final RexNode argY = rexBuilder.ensureType(argYType, inputExprs.get(argYOrdinal), true);
     final RexNode covarPop = getCovarianceNode(oldAggRel, oldCall, true, false, newCalls,
@@ -628,6 +629,30 @@ public class AggregateReduceFunctionsRule extends RelOptRule {
         newCalls, aggCallMapping, oldCallType, argRef, argRef, inputExprs);
   }
 
+  private RexNode getSumRexNode(Aggregate oldAggRel,
+                  AggregateCall oldCall,
+                  List<AggregateCall> newCalls,
+                  Map<AggregateCall, RexNode> aggCallMapping,
+                  RexBuilder rexBuilder,
+                  List<Integer> argOrdinals) {
+    final AggregateCall aggregateCall =
+            AggregateCall.create(SqlStdOperatorTable.SUM,
+                    oldCall.isDistinct(),
+                    oldCall.isApproximate(),
+                    argOrdinals,
+                    oldCall.filterArg,
+                    oldAggRel.getGroupCount(),
+                    oldAggRel.getInput(),
+                    null,
+                    null);
+    return rexBuilder.addAggCall(aggregateCall,
+                    oldAggRel.getGroupCount(),
+                    oldAggRel.indicator,
+                    newCalls,
+                    aggCallMapping,
+                    ImmutableList.of(aggregateCall.getType()));
+  }
+
   private RexNode getCovarianceNode(Aggregate oldAggRel,
       AggregateCall oldCall,
       boolean biased,
@@ -640,8 +665,10 @@ public class AggregateReduceFunctionsRule extends RelOptRule {
       List<RexNode> inputExprs) {
     final RelOptCluster cluster = oldAggRel.getCluster();
     final RexBuilder rexBuilder = cluster.getRexBuilder();
-    final int argOrdinal = oldCall.getArgList().get(0);
-    final RelDataType argOrdinalType = getFieldType(oldAggRel.getInput(), argOrdinal);
+    final int argXOrdinal = oldCall.getArgList().get(0);
+    final int argYOrdinal = argRef1 == argRef2 ? argXOrdinal : oldCall.getArgList().get(1);
+    final RelDataType argXOrdinalType = getFieldType(oldAggRel.getInput(), argXOrdinal);
+    final RelDataType argYOrdinalType = getFieldType(oldAggRel.getInput(), argYOrdinal);
     final RexNode argSquared = rexBuilder.makeCall(SqlStdOperatorTable.MULTIPLY, argRef1, argRef2);
     final int argSquaredOrdinal = lookupOrAdd(inputExprs, argSquared);
     final RelDataTypeFactory typeFactory = cluster.getTypeFactory();
@@ -658,28 +685,40 @@ public class AggregateReduceFunctionsRule extends RelOptRule {
             aggCallMapping,
             ImmutableList.of(sumArgSquaredAggCall.getType()));
 
-    final AggregateCall sumArgAggCall =
-        AggregateCall.create(SqlStdOperatorTable.SUM,
+    final Function<List<Integer>, AggregateCall> integerAggregateCallFunction =
+        argOrdinals -> AggregateCall.create(SqlStdOperatorTable.SUM,
             oldCall.isDistinct(),
             oldCall.isApproximate(),
-            ImmutableIntList.of(argOrdinal),
+            argOrdinals,
             oldCall.filterArg,
             oldAggRel.getGroupCount(),
             oldAggRel.getInput(),
             null,
             null);
-
-    final RexNode sumArg =
-        rexBuilder.addAggCall(sumArgAggCall,
+    Function<AggregateCall, RexNode> aggregateCallRexNodeFunction =
+        sumArgXAggCall1 -> rexBuilder.addAggCall(sumArgXAggCall1,
             nGroups,
             oldAggRel.indicator,
             newCalls,
             aggCallMapping,
-            ImmutableList.of(sumArgAggCall.getType()));
-    final RexNode sumArgCast = rexBuilder.ensureType(oldCallType, sumArg, true);
+            ImmutableList.of(sumArgXAggCall1.getType()));
+
+    final AggregateCall sumArgXAggCall = integerAggregateCallFunction.apply(
+        argRef1 == argRef2
+            ? ImmutableList.of(argXOrdinal)
+            : ImmutableList.of(argXOrdinal, argYOrdinal)
+    );
+    final RexNode sumArgX = aggregateCallRexNodeFunction.apply(sumArgXAggCall);
+    final AggregateCall sumArgYAggCall = argRef1 == argRef2
+        ? sumArgXAggCall
+        : integerAggregateCallFunction.apply(ImmutableList.of(argYOrdinal, argXOrdinal));
+    final RexNode sumArgY = argRef1 == argRef2
+        ? sumArgX
+        : aggregateCallRexNodeFunction.apply(sumArgYAggCall);
+
     final RexNode sumSquaredArg =
         rexBuilder.makeCall(
-            SqlStdOperatorTable.MULTIPLY, sumArgCast, sumArgCast);
+            SqlStdOperatorTable.MULTIPLY, sumArgX, sumArgY);
 
     final AggregateCall countArgAggCall =
         AggregateCall.create(argRef1 == argRef2
@@ -690,7 +729,7 @@ public class AggregateReduceFunctionsRule extends RelOptRule {
             oldCall.getArgList(),
             oldCall.filterArg,
             oldAggRel.getGroupCount(),
-            oldAggRel,
+            oldAggRel.getInput(),
             null,
             null);
 
@@ -700,7 +739,7 @@ public class AggregateReduceFunctionsRule extends RelOptRule {
             oldAggRel.indicator,
             newCalls,
             aggCallMapping,
-            ImmutableList.of(argOrdinalType));
+            ImmutableList.of(argXOrdinalType, argYOrdinalType));
 
     final RexNode avgSumSquaredArg =
         rexBuilder.makeCall(
@@ -757,13 +796,13 @@ public class AggregateReduceFunctionsRule extends RelOptRule {
       boolean covar,
       boolean left) {
     // regr_sxx(x, y) ==>
-    //    regr_count(x * y) * var_pop(y)
+    //    regr_count(x, y) * var_pop(y)
     //
     // regr_sxy(x, y) ==>
-    //    regr_count(x * y) * covar_pop(x, y)
+    //    regr_count(x, y) * covar_pop(x, y)
     //
     // regr_syy(x, y) ==>
-    //    regr_count(x * y) * var_pop(y)
+    //    regr_count(x, y) * var_pop(y)
 
     assert oldCall.getArgList().size() == 2 : oldCall.getArgList();
     final RelOptCluster cluster = oldAggRel.getCluster();
@@ -785,11 +824,24 @@ public class AggregateReduceFunctionsRule extends RelOptRule {
     final RexNode arg1Ref =
         rexBuilder.ensureType(oldCallType, inputExprs.get(argOrdinal1), true);
 
+    final RexNode varCovarFactor =
+        getSumRexNode(oldAggRel, oldCall, newCalls, aggCallMapping, rexBuilder,
+            ImmutableList.of(argOrdinal0, argOrdinal1));
+    /*if (covar) {
+      varCovarFactor = getCovarianceNode(oldAggRel, oldCall, true, false, newCalls, aggCallMapping,
+              oldCallType, arg0Ref, arg1Ref, inputExprs);
+    } else {
+      RexNode arg = left ? arg1Ref : arg0Ref;
+      varCovarFactor =
+              getCovarianceNode(oldAggRel, oldCall, true, false, newCalls, aggCallMapping,
+                      oldCallType, arg, arg, inputExprs);
+    }
+*/
     final AggregateCall countArgAggCall =
         AggregateCall.create(SqlStdOperatorTable.REGR_COUNT,
             oldCall.isDistinct(),
             oldCall.isApproximate(),
-            oldCall.getArgList(),
+            ImmutableList.of(argOrdinal0, argOrdinal1),
             oldCall.filterArg,
             oldAggRel.getGroupCount(),
             oldAggRel,
@@ -804,19 +856,10 @@ public class AggregateReduceFunctionsRule extends RelOptRule {
             aggCallMapping,
             ImmutableList.of(argOrdinalType0, argOrdinalType1));
 
-    final RexNode varCovarFactor;
-    if (covar) {
-      varCovarFactor = getCovarianceNode(oldAggRel, oldCall, true, false, newCalls, aggCallMapping,
-          oldCallType, arg0Ref, arg1Ref, inputExprs);
-    } else {
-      RexNode arg = left ? arg0Ref : arg1Ref;
-      varCovarFactor =
-          getCovarianceNode(oldAggRel, oldCall, true, false, newCalls, aggCallMapping,
-              oldCallType, arg, arg, inputExprs);
-    }
     final RexNode result =
         rexBuilder.makeCall(SqlStdOperatorTable.MULTIPLY, countArg, varCovarFactor);
-    return rexBuilder.makeCast(oldCall.getType(), result);
+    System.out.println(varCovarFactor);
+    return rexBuilder.makeCast(oldCall.getType(), varCovarFactor);
   }
 
   private RexNode reduceAvgZ(
@@ -892,32 +935,32 @@ public class AggregateReduceFunctionsRule extends RelOptRule {
       Map<AggregateCall, RexNode> aggCallMapping,
       List<RexNode> inputExprs) {
     // corr(x, y) ==>
-    //   var_pop(x) / (stddev_pop(x) * stddev_pop(y))
+    //   covar_pop(x, y) / (stddev_pop(x) * stddev_pop(y))
 
     assert oldCall.getArgList().size() == 2 : oldCall.getArgList();
     final RelOptCluster cluster = oldAggRel.getCluster();
     final RexBuilder rexBuilder = cluster.getRexBuilder();
     final RelDataTypeFactory typeFactory = cluster.getTypeFactory();
-    final int argOrdinal0 = oldCall.getArgList().get(0);
-    final int argOrdinal1 = oldCall.getArgList().get(1);
-    final RelDataType argOrdinalType0 = getFieldType(oldAggRel.getInput(), argOrdinal0);
-    final RelDataType argOrdinalType1 = getFieldType(oldAggRel.getInput(), argOrdinal1);
+    final int argXOrdinal = oldCall.getArgList().get(0);
+    final int argYOrdinal = oldCall.getArgList().get(1);
+    final RelDataType argXOrdinalType = getFieldType(oldAggRel.getInput(), argXOrdinal);
+    final RelDataType argYOrdinalType = getFieldType(oldAggRel.getInput(), argYOrdinal);
 
     final RelDataType oldCallType =
         typeFactory.createTypeWithNullability(oldCall.getType(),
-            argOrdinalType0.isNullable() || argOrdinalType1.isNullable());
+            argXOrdinalType.isNullable() || argYOrdinalType.isNullable());
 
-    final RexNode arg0Ref =
-        rexBuilder.ensureType(oldCallType, inputExprs.get(argOrdinal0), true);
-    final RexNode arg1Ref =
-        rexBuilder.ensureType(oldCallType, inputExprs.get(argOrdinal1), true);
+    final RexNode argX =
+        rexBuilder.ensureType(oldCallType, inputExprs.get(argXOrdinal), true);
+    final RexNode argY =
+        rexBuilder.ensureType(oldCallType, inputExprs.get(argYOrdinal), true);
 
     RexNode covarPop = getCovarianceNode(oldAggRel, oldCall, true, false,
-        newCalls, aggCallMapping, oldCallType, arg0Ref, arg0Ref, inputExprs);
+        newCalls, aggCallMapping, oldCallType, argX, argY, inputExprs);
     RexNode stddevPop0 = getCovarianceNode(oldAggRel, oldCall, true, true,
-        newCalls, aggCallMapping, oldCallType, arg0Ref, arg0Ref, inputExprs);
+        newCalls, aggCallMapping, oldCallType, argX, argX, inputExprs);
     RexNode stddevPop1 = getCovarianceNode(oldAggRel, oldCall, true, true,
-        newCalls, aggCallMapping, oldCallType, arg1Ref, arg1Ref, inputExprs);
+        newCalls, aggCallMapping, oldCallType, argY, argY, inputExprs);
     final RexNode denominator =
         rexBuilder.makeCall(SqlStdOperatorTable.MULTIPLY, stddevPop0, stddevPop1);
     return rexBuilder.makeCast(oldCallType,
@@ -948,21 +991,21 @@ public class AggregateReduceFunctionsRule extends RelOptRule {
     final RelDataTypeFactory typeFactory = cluster.getTypeFactory();
 
     assert oldCall.getArgList().size() == 2 : oldCall.getArgList();
-    final int arg0Ordinal = oldCall.getArgList().get(0);
-    final int arg1Ordinal = oldCall.getArgList().get(1);
-    final RelDataType arg0OrdinalType = getFieldType(oldAggRel.getInput(), arg0Ordinal);
-    final RelDataType arg1OrdinalType = getFieldType(oldAggRel.getInput(), arg1Ordinal);
+    final int argXOrdinal = oldCall.getArgList().get(0);
+    final int argYOrdinal = oldCall.getArgList().get(1);
+    final RelDataType argXOrdinalType = getFieldType(oldAggRel.getInput(), argXOrdinal);
+    final RelDataType argYOrdinalType = getFieldType(oldAggRel.getInput(), argYOrdinal);
     final RelDataType oldCallType =
         typeFactory.createTypeWithNullability(oldCall.getType(),
-            arg0OrdinalType.isNullable() || arg1OrdinalType.isNullable());
+            argXOrdinalType.isNullable() || argYOrdinalType.isNullable());
 
-    final RexNode arg0Ref =
-        rexBuilder.ensureType(oldCallType, inputExprs.get(arg0Ordinal), true);
-    final RexNode arg1Ref =
-        rexBuilder.ensureType(oldCallType, inputExprs.get(arg1Ordinal), true);
+    final RexNode argX =
+        rexBuilder.ensureType(oldCallType, inputExprs.get(argXOrdinal), true);
+    final RexNode argY =
+        rexBuilder.ensureType(oldCallType, inputExprs.get(argYOrdinal), true);
 
     RexNode result = getCovarianceNode(oldAggRel, oldCall, biased, sqrt, newCalls, aggCallMapping,
-        oldCallType, arg0Ref, arg1Ref, inputExprs);
+        oldCallType, argX, argY, inputExprs);
     return rexBuilder.makeCast(oldCall.getType(), result);
   }
 

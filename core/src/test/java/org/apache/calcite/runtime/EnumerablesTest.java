@@ -16,6 +16,10 @@
  */
 package org.apache.calcite.runtime;
 
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import org.apache.calcite.linq4j.Enumerable;
 import org.apache.calcite.linq4j.EnumerableDefaults;
 import org.apache.calcite.linq4j.Linq4j;
@@ -25,8 +29,11 @@ import org.apache.calcite.linq4j.function.Predicate2;
 
 import com.google.common.collect.Lists;
 
+import org.apache.calcite.model.JsonRoot;
 import org.junit.Test;
 
+import java.io.File;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -67,6 +74,18 @@ public class EnumerablesTest {
         EnumerableDefaults.semiJoin(EMPS, DEPTS, e -> e.deptno, d -> d.deptno,
             Functions.identityComparer()).toList().toString(),
         equalTo("[Emp(20, Theodore), Emp(20, Sebastian)]"));
+  }
+
+  @Test public void test2() throws IOException {
+    ObjectMapper jsonReader = new ObjectMapper();
+    jsonReader.configure(JsonParser.Feature.ALLOW_UNQUOTED_FIELD_NAMES, true);
+    jsonReader.configure(JsonParser.Feature.ALLOW_SINGLE_QUOTES, true);
+    jsonReader.configure(JsonParser.Feature.ALLOW_COMMENTS, true);
+    Object obj = jsonReader.readValue(new File("D:\\work\\snuyanzin_calcite\\example\\csv\\target\\test-classes\\model.json"), JsonRoot.class);
+
+
+    ObjectMapper jsonWriter = new ObjectMapper(new YAMLFactory());
+    System.out.println(jsonWriter.writeValueAsString(obj));
   }
 
   @Test public void testMergeJoin() {

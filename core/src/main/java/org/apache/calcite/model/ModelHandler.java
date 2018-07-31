@@ -46,6 +46,7 @@ import org.apache.calcite.util.Util;
 
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
@@ -77,10 +78,11 @@ public class ModelHandler {
     super();
     this.connection = connection;
     this.modelUri = uri;
-    final ObjectMapper mapper = new ObjectMapper();
+    final ObjectMapper mapper = new ObjectMapper(new YAMLFactory());
     mapper.configure(JsonParser.Feature.ALLOW_UNQUOTED_FIELD_NAMES, true);
     mapper.configure(JsonParser.Feature.ALLOW_SINGLE_QUOTES, true);
     mapper.configure(JsonParser.Feature.ALLOW_COMMENTS, true);
+
     JsonRoot root;
     if (uri.startsWith("inline:")) {
       root = mapper.readValue(
